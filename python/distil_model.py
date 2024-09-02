@@ -12,8 +12,6 @@ from sgfmetadata import SGFMetadata
 size = 19
 
 def get_model_outputs(pla, sgfmeta, bin_input_data, global_input_data, model):
-
-
     input_meta = None
     if sgfmeta is not None:
         metarow = sgfmeta.get_metadata_row(nextPlayer=pla, boardArea=size*size)
@@ -25,19 +23,59 @@ def get_model_outputs(pla, sgfmeta, bin_input_data, global_input_data, model):
     return model(
         torch.tensor(bin_input_data, dtype=torch.float32, device=model.device),
         torch.tensor(global_input_data, dtype=torch.float32, device=model.device),
-        input_meta = input_meta,
+        input_meta=input_meta,
         extra_outputs=extra_outputs,
     )
 
-def get_input_features(features: Features):
-    bin_input_data = np.random.rand(1, *features.bin_input_shape).astype(np.float32)
-    global_input_data = np.random.rand(1, *features.global_input_shape).astype(np.float32)
+def get_input_features(features: Features, batch_size):
+    # Initialize binary input data with zeros
+    bin_input_data = np.zeros(shape=(batch_size, *features.bin_input_shape), dtype=np.float32)
+    
+    # Features have shape [N, C, H, W] where N is batch size, C is the number of channels, H and W are the height and width of the board
+    # We loop over each channel and populate it accordingly
+    
+    num_channels = features.bin_input_shape[0]  # This should be the number of channels (C)
+    board_height = features.bin_input_shape[1]  # Board height (19 for a 19x19 board)
+    board_width = features.bin_input_shape[2]   # Board width (19 for a 19x19 board)
+    
+    for idx in range(num_channels):
+        if idx in [0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]:
+            # Generate binary features
+            bin_input_data[:, idx, :, :] = np.random.randint(0, 2, size=(batch_size, board_height, board_width)).astype(np.float32)
+        else:
+            # Handle non-binary or uninitialized channels as needed (e.g., might be zeros or a specific pattern)
+            pass
 
-    pos_len = features.pos_len
-    bin_input_data = bin_input_data.reshape([1,pos_len,pos_len,-1])
-    bin_input_data = np.transpose(bin_input_data,axes=(0,3,1,2))
+    # Initialize global input data with realistic ranges
+    global_input_data = np.zeros(shape=(batch_size, *features.global_input_shape), dtype=np.float32)
+    
+    # Komi feature: scaled between -1 and 1 based on typical komi ranges and normalization
+    board_area = board_height * board_width
+    global_input_data[:, 5] = np.random.uniform(-board_area / 20.0, board_area / 20.0, size=(batch_size,)).astype(np.float32)
 
+    # Set specific global features to binary values (0 or 1)
+    binary_global_indices = [0, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 17]
+    global_input_data[:, binary_global_indices] = np.random.randint(0, 2, size=(batch_size, len(binary_global_indices))).astype(np.float32)
+
+    # Wave function for komi (index 18) - represents a wave-like pattern based on komi
+    komi_floor_delta = np.random.uniform(0, 2, size=(batch_size,)).astype(np.float32)
+    wave_feature = np.where(komi_floor_delta < 0.5, komi_floor_delta,
+                            np.where(komi_floor_delta < 1.5, 1.0 - komi_floor_delta, komi_floor_delta - 2.0))
+    global_input_data[:, 18] = wave_feature
+
+    # Return the data in the correct format for the model
     return bin_input_data, global_input_data
+
+
+# def get_input_features(features: Features, batch_size):
+#     bin_input_data = np.random.randint(2, batch_size, *features.bin_input_shape).astype(np.float32)
+#     global_input_data = np.random.randint(2, batch_size, *features.global_input_shape).astype(np.float32)
+
+#     pos_len = features.pos_len
+#     bin_input_data = bin_input_data.reshape([batch_size, pos_len, pos_len, -1])
+#     bin_input_data = np.transpose(bin_input_data, axes=(0, 3, 1, 2))
+
+#     return bin_input_data, global_input_data
 
 device = torch.device("cpu")
 
@@ -46,7 +84,6 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Construct the full path to the model files
 model_path_b6c96 = os.path.join(script_dir, "checkpoints/model_b6c96_epoch_4_s640_d640.ckpt")
-
 model_path_b18c384 = os.path.join(script_dir, "b18c384nbt-humanv0.ckpt")
 
 # Load the b6c96 model
@@ -62,9 +99,8 @@ model_b6c96.to(device)
 
 def generate_new_model(config="b6c96-fson-mish-rvgl-bnh"):
     model_config = config_of_name[config]
-    model = Model(model_config,size)
+    model = Model(model_config, size)
     model.initialize()
-
 
 # Load the b18c384 model
 model_b18c384, swa_model_b18c384, _ = load_model(
@@ -80,7 +116,8 @@ print(model_b6c96.config)
 
 print("model config model_b18c384")
 print(model_b18c384.config)
-# Define a loss function (e.g., Mean Squared Error)
+
+# Define a new loss function (Smooth L1 Loss)
 criterion = nn.MSELoss()
 
 # Define an optimizer
@@ -118,6 +155,7 @@ def save_checkpoint(model_state_dict, swa_model_state_dict, optimizer_state_dict
 
 # Training loop
 num_epochs = 2000
+batch_size = 32  # Define a batch size for training
 train_state = {
     "global_step_samples": 0,  # Example, replace with actual step count
 }
@@ -147,7 +185,7 @@ for epoch in range(num_epochs):
         pla = np.random.randint(2)
         
         features = Features(model_b18c384.config, model_b18c384.pos_len)
-        inputs, input_global = get_input_features(features)
+        inputs, input_global = get_input_features(features, batch_size=batch_size)
         
         # Forward pass through both models
         outputs_b6c96 = get_model_outputs(pla, sgfmeta, inputs, input_global, model_b6c96)
@@ -171,7 +209,7 @@ for epoch in range(num_epochs):
     print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
 
     # Define checkpoint file path
-    modelname = f"model_b6c96_epoch_{epoch+1}_s{train_state['global_step_samples']}}"
+    modelname = f"model_b6c96_epoch_{epoch+1}_s{train_state['global_step_samples']}"
     checkpoint_path = os.path.join("checkpoints", modelname + ".ckpt")
 
     # Save the checkpoint
