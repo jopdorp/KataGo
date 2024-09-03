@@ -1,6 +1,7 @@
 import os
 from load_model import load_model, Model
 from modelconfigs import config_of_name
+from board import Board
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,6 +9,13 @@ from features import Features
 import numpy as np
 from model_pytorch import ExtraOutputs
 from sgfmetadata import SGFMetadata
+from gamestate import GameState
+import argparse
+
+# Command-line argument parsing
+parser = argparse.ArgumentParser(description="Train a Go AI model.")
+parser.add_argument('--load-model', type=str, help='Path to the model to load')
+args = parser.parse_args()
 
 size = 19
 
@@ -66,18 +74,9 @@ def get_input_features(features: Features, batch_size):
     # Return the data in the correct format for the model
     return bin_input_data, global_input_data
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# def get_input_features(features: Features, batch_size):
-#     bin_input_data = np.random.randint(2, batch_size, *features.bin_input_shape).astype(np.float32)
-#     global_input_data = np.random.randint(2, batch_size, *features.global_input_shape).astype(np.float32)
-
-#     pos_len = features.pos_len
-#     bin_input_data = bin_input_data.reshape([batch_size, pos_len, pos_len, -1])
-#     bin_input_data = np.transpose(bin_input_data, axes=(0, 3, 1, 2))
-
-#     return bin_input_data, global_input_data
-
-device = torch.device("cpu")
+print(f"Using device: {device}")
 
 # Get the directory where the current script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -86,21 +85,27 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 model_path_b6c96 = os.path.join(script_dir, "checkpoints/model_b6c96_epoch_4_s640_d640.ckpt")
 model_path_b18c384 = os.path.join(script_dir, "b18c384nbt-humanv0.ckpt")
 
-# Load the b6c96 model
-model_b6c96, swa_model_b6c96, _ = load_model(
-    model_path_b6c96, 
-    use_swa=False,  # or True if you want to use SWA
-    device=device,
-    pos_len=19,  # Adjust if needed
-    verbose=True
-)
-
-model_b6c96.to(device)
 
 def generate_new_model(config="b6c96-fson-mish-rvgl-bnh"):
     model_config = config_of_name[config]
     model = Model(model_config, size)
     model.initialize()
+    return model
+
+# Model loading or generation
+if args.load_model:
+    print(f"Loading model from {args.load_model}")
+    model_b6c96, swa_model_b6c96, _ = load_model(
+        args.load_model,
+        use_swa=False,  # or True if you want to use SWA
+        device=device,
+        pos_len=size,
+        verbose=False
+    )
+else:
+    print("No model path provided. Generating a new model.")
+    model_b6c96 = generate_new_model()
+    model_b6c96.to(device)
 
 # Load the b18c384 model
 model_b18c384, swa_model_b18c384, _ = load_model(
@@ -108,7 +113,7 @@ model_b18c384, swa_model_b18c384, _ = load_model(
     use_swa=False, 
     device=device,
     pos_len=19, 
-    verbose=True
+    verbose=False
 )
 
 print("model config model_b6c96")
@@ -121,7 +126,7 @@ print(model_b18c384.config)
 criterion = nn.MSELoss()
 
 # Define an optimizer
-optimizer = optim.Adam(model_b6c96.parameters(), lr=1e-4)
+optimizer = optim.Adam(model_b6c96.parameters(), lr=1e-2)
 
 def flatten_all_tensors(output):
     if isinstance(output, (tuple, list)):
@@ -153,6 +158,59 @@ def save_checkpoint(model_state_dict, swa_model_state_dict, optimizer_state_dict
     torch.save(state_dict, path + ".tmp")
     os.replace(path + ".tmp", path)
 
+def choose_move(moves_and_probs):
+    if not moves_and_probs:
+        raise ValueError("moves_and_probs is empty, cannot choose a move.")
+
+    choice = np.random.rand()  # choose random float between 0 and 1
+    cumulative_prob = 0
+    
+    for prob in moves_and_probs:
+        cumulative_prob += prob[1]
+        if cumulative_prob >= choice:
+            prob_loc = prob[0]
+            col = (prob_loc) % (19 + 1) - 1
+            row = np.floor(prob_loc / (19 + 1)) - 1
+            return int((size + 1) * (row + 1) + (col + 1))
+
+    # Fallback: if no move is selected (cumulative_prob < 1.0 due to rounding errors), return the last move
+    prob_loc = moves_and_probs[-1][0]
+    col = (prob_loc) % (19 + 1) - 1
+    row = np.floor(prob_loc / (19 + 1)) - 1
+    return int((size + 1) * (row + 1) + (col + 1))
+
+def post_process_outputs(board, model, model_outputs):
+    outputs = model.postprocess_output(model_outputs)
+    (
+        policy_logits,      # N, num_policy_outputs, move
+        value_logits,       # N, {win,loss,noresult}
+        td_value_logits,    # N, {long, mid, short} {win,loss,noresult}
+        pred_td_score,      # N, {long, mid, short}
+        ownership_pretanh,  # N, 1, y, x
+        pred_scoring,       # N, 1, y, x
+        futurepos_pretanh,  # N, 2, y, x
+        seki_logits,        # N, 4, y, x
+        pred_scoremean,     # N
+        pred_scorestdev,    # N
+        pred_lead,          # N
+        pred_variance_time, # N
+        pred_shortterm_value_error, # N
+        pred_shortterm_score_error, # N
+        scorebelief_logits, # N, 2 * (self.pos_len*self.pos_len + EXTRA_SCORE_DISTR_RADIUS)
+    ) = (x[0] for x in outputs[0]) # N = 0
+
+    policy0 = torch.nn.functional.softmax(policy_logits[0,:],dim=0).cpu().numpy()
+
+    moves_and_probs0 = []
+    for i in range(len(policy0)):
+        move = features.tensor_pos_to_loc(i,board)
+        if i == len(policy0)-1:
+            moves_and_probs0.append((Board.PASS_LOC,policy0[i]))
+        elif board.would_be_legal(board.pla ,move):
+            moves_and_probs0.append((move,policy0[i]))
+    
+    return moves_and_probs0
+
 # Training loop
 num_epochs = 2000
 batch_size = 32  # Define a batch size for training
@@ -160,11 +218,17 @@ train_state = {
     "global_step_samples": 0,  # Example, replace with actual step count
 }
 
-for epoch in range(num_epochs):
-    model_b6c96.train()
-    model_b18c384.eval()
+def new_game():
+    return GameState(size, GameState.RULES_JAPANESE)
 
-    for _ in range(100):  # Set num_batches to control how many batches you want per epoch
+model_b6c96.train()
+model_b18c384.eval()
+features = Features(model_b18c384.config, model_b18c384.pos_len)
+
+for epoch in range(num_epochs):
+    game_state = new_game()
+    move = 1
+    while move is not Board.PASS_LOC: #Play one game per epoch
         sgfmeta = {
             "inverseBRank": np.random.randint(31),
             "inverseWRank": np.random.randint(31),
@@ -182,18 +246,27 @@ for epoch in range(num_epochs):
         }
 
         sgfmeta = SGFMetadata.of_dict(sgfmeta)
-        pla = np.random.randint(2)
         
-        features = Features(model_b18c384.config, model_b18c384.pos_len)
-        inputs, input_global = get_input_features(features, batch_size=batch_size)
         
-        # Forward pass through both models
-        outputs_b6c96 = get_model_outputs(pla, sgfmeta, inputs, input_global, model_b6c96)
-        outputs_b18c384 = get_model_outputs(pla, sgfmeta, inputs, input_global, model_b18c384)
+        bin_input_data = np.random.randint(low=0, high=1, size=(batch_size, *features.bin_input_shape))
+        global_input_data = np.random.randint(low=0, high=1, size=(batch_size, *features.global_input_shape))
 
+        for i in range(batch_size):
+            inputs, input_global = game_state.get_input_features(features)
+            bin_input_data[i] = inputs
+            global_input_data[i] = input_global
+            moves_and_probs = game_state.get_model_outputs(model_b18c384, sgfmeta)["moves_and_probs0"]
+            move = choose_move(moves_and_probs)
+            game_state.play(game_state.board.pla, move)
+
+        # Forward pass through both models
+        outputs_b6c96 = get_model_outputs(game_state.board.pla, sgfmeta, inputs, input_global, model_b6c96)
+        with torch.no_grad():
+            outputs_b18c384 = get_model_outputs(game_state.board.pla, sgfmeta, inputs, input_global, model_b18c384)
+        
         outputs_b6c96 = flatten_all_tensors(outputs_b6c96)
         outputs_b18c384 = flatten_all_tensors(outputs_b18c384)
-        
+
         # Calculate loss
         loss = criterion(outputs_b6c96, outputs_b18c384)
 
@@ -202,8 +275,9 @@ for epoch in range(num_epochs):
         loss.backward()
         optimizer.step()
 
-    # Update train_state (for example, by incrementing steps and rows)
-    train_state["global_step_samples"] += 1  # Example update
+        # Update train_state (for example, by incrementing steps and rows)
+        train_state["global_step_samples"] += 1  # Example update
+
 
     # Print loss for this epoch
     print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
