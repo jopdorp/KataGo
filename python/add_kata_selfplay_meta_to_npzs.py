@@ -2,6 +2,7 @@ import os
 import sys
 import random
 import numpy as np
+from board import Board
 
 from sgfmetadata import SGFMetadata
 

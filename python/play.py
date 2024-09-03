@@ -440,7 +440,7 @@ while True:
     ret = ''
     if command[0] == "boardsize":
         if int(command[1]) > features.pos_len:
-            print("Warning: Trying to set incompatible boardsize %s (!= %d)" % (command[1], N), file=sys.stderr)
+            print("Warning: Trying to set incompatible boardsize %s (!= %d)" % (command[1], None), file=sys.stderr)
             ret = None
         board_size = int(command[1])
         gs = GameState(board_size)
