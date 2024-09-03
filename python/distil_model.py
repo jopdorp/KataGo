@@ -10,12 +10,6 @@ import numpy as np
 from model_pytorch import ExtraOutputs
 from sgfmetadata import SGFMetadata
 from gamestate import GameState
-import argparse
-
-# Command-line argument parsing
-parser = argparse.ArgumentParser(description="Train a Go AI model.")
-parser.add_argument('--load-model', type=str, help='Path to the model to load')
-args = parser.parse_args()
 
 size = 19
 
@@ -74,9 +68,7 @@ def get_input_features(features: Features, batch_size):
     # Return the data in the correct format for the model
     return bin_input_data, global_input_data
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-print(f"Using device: {device}")
+device = torch.device("cpu")
 
 # Get the directory where the current script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -92,20 +84,19 @@ def generate_new_model(config="b6c96-fson-mish-rvgl-bnh"):
     model.initialize()
     return model
 
-# Model loading or generation
-if args.load_model:
-    print(f"Loading model from {args.load_model}")
-    model_b6c96, swa_model_b6c96, _ = load_model(
-        args.load_model,
-        use_swa=False,  # or True if you want to use SWA
-        device=device,
-        pos_len=size,
-        verbose=False
-    )
-else:
-    print("No model path provided. Generating a new model.")
-    model_b6c96 = generate_new_model()
-    model_b6c96.to(device)
+model_b6c96 = generate_new_model()
+
+# # Load the b6c96 model
+# model_b6c96, swa_model_b6c96, _ = load_model(
+#     model_path_b6c96, 
+#     use_swa=False,  # or True if you want to use SWA
+#     device=device,
+#     pos_len=19,  # Adjust if needed
+#     verbose=False
+# )
+
+model_b6c96.to(device)
+
 
 # Load the b18c384 model
 model_b18c384, swa_model_b18c384, _ = load_model(
@@ -126,7 +117,7 @@ print(model_b18c384.config)
 criterion = nn.MSELoss()
 
 # Define an optimizer
-optimizer = optim.Adam(model_b6c96.parameters(), lr=1e-2)
+optimizer = optim.Adam(model_b6c96.parameters(), lr=1e-4)
 
 def flatten_all_tensors(output):
     if isinstance(output, (tuple, list)):
@@ -159,12 +150,8 @@ def save_checkpoint(model_state_dict, swa_model_state_dict, optimizer_state_dict
     os.replace(path + ".tmp", path)
 
 def choose_move(moves_and_probs):
-    if not moves_and_probs:
-        raise ValueError("moves_and_probs is empty, cannot choose a move.")
-
-    choice = np.random.rand()  # choose random float between 0 and 1
+    choice = np.random.rand() # chooise random float between 0 and 1
     cumulative_prob = 0
-    
     for prob in moves_and_probs:
         cumulative_prob += prob[1]
         if cumulative_prob >= choice:
@@ -172,12 +159,6 @@ def choose_move(moves_and_probs):
             col = (prob_loc) % (19 + 1) - 1
             row = np.floor(prob_loc / (19 + 1)) - 1
             return int((size + 1) * (row + 1) + (col + 1))
-
-    # Fallback: if no move is selected (cumulative_prob < 1.0 due to rounding errors), return the last move
-    prob_loc = moves_and_probs[-1][0]
-    col = (prob_loc) % (19 + 1) - 1
-    row = np.floor(prob_loc / (19 + 1)) - 1
-    return int((size + 1) * (row + 1) + (col + 1))
 
 def post_process_outputs(board, model, model_outputs):
     outputs = model.postprocess_output(model_outputs)
@@ -223,7 +204,6 @@ def new_game():
 
 model_b6c96.train()
 model_b18c384.eval()
-features = Features(model_b18c384.config, model_b18c384.pos_len)
 
 for epoch in range(num_epochs):
     game_state = new_game()
@@ -246,27 +226,19 @@ for epoch in range(num_epochs):
         }
 
         sgfmeta = SGFMetadata.of_dict(sgfmeta)
+        pla = np.random.randint(2)
         
+        features = Features(model_b18c384.config, model_b18c384.pos_len)
+        inputs, input_global = game_state.get_input_features(features)
         
-        bin_input_data = np.random.randint(low=0, high=1, size=(batch_size, *features.bin_input_shape))
-        global_input_data = np.random.randint(low=0, high=1, size=(batch_size, *features.global_input_shape))
-
-        for i in range(batch_size):
-            inputs, input_global = game_state.get_input_features(features)
-            bin_input_data[i] = inputs
-            global_input_data[i] = input_global
-            moves_and_probs = game_state.get_model_outputs(model_b18c384, sgfmeta)["moves_and_probs0"]
-            move = choose_move(moves_and_probs)
-            game_state.play(game_state.board.pla, move)
-
         # Forward pass through both models
-        outputs_b6c96 = get_model_outputs(game_state.board.pla, sgfmeta, inputs, input_global, model_b6c96)
+        outputs_b6c96 = get_model_outputs(pla, sgfmeta, inputs, input_global, model_b6c96)
         with torch.no_grad():
-            outputs_b18c384 = get_model_outputs(game_state.board.pla, sgfmeta, inputs, input_global, model_b18c384)
-        
+            outputs_b18c384 = get_model_outputs(pla, sgfmeta, inputs, input_global, model_b18c384)
+            
         outputs_b6c96 = flatten_all_tensors(outputs_b6c96)
         outputs_b18c384 = flatten_all_tensors(outputs_b18c384)
-
+        
         # Calculate loss
         loss = criterion(outputs_b6c96, outputs_b18c384)
 
@@ -278,6 +250,9 @@ for epoch in range(num_epochs):
         # Update train_state (for example, by incrementing steps and rows)
         train_state["global_step_samples"] += 1  # Example update
 
+        moves_and_probs = game_state.get_model_outputs(model_b18c384, sgfmeta)["moves_and_probs0"]
+        move = choose_move(moves_and_probs)
+        game_state.play(game_state.board.pla, move)
 
     # Print loss for this epoch
     print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
