@@ -10,6 +10,7 @@ import numpy as np
 from model_pytorch import ExtraOutputs
 from sgfmetadata import SGFMetadata
 from gamestate import GameState
+import argparse
 
 size = 19
 
@@ -29,54 +30,10 @@ def get_model_outputs(pla, sgfmeta, bin_input_data, global_input_data, model):
         extra_outputs=extra_outputs,
     )
 
-def get_input_features(features: Features, batch_size):
-    # Initialize binary input data with zeros
-    bin_input_data = np.zeros(shape=(batch_size, *features.bin_input_shape), dtype=np.float32)
-    
-    # Features have shape [N, C, H, W] where N is batch size, C is the number of channels, H and W are the height and width of the board
-    # We loop over each channel and populate it accordingly
-    
-    num_channels = features.bin_input_shape[0]  # This should be the number of channels (C)
-    board_height = features.bin_input_shape[1]  # Board height (19 for a 19x19 board)
-    board_width = features.bin_input_shape[2]   # Board width (19 for a 19x19 board)
-    
-    for idx in range(num_channels):
-        if idx in [0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]:
-            # Generate binary features
-            bin_input_data[:, idx, :, :] = np.random.randint(0, 2, size=(batch_size, board_height, board_width)).astype(np.float32)
-        else:
-            # Handle non-binary or uninitialized channels as needed (e.g., might be zeros or a specific pattern)
-            pass
-
-    # Initialize global input data with realistic ranges
-    global_input_data = np.zeros(shape=(batch_size, *features.global_input_shape), dtype=np.float32)
-    
-    # Komi feature: scaled between -1 and 1 based on typical komi ranges and normalization
-    board_area = board_height * board_width
-    global_input_data[:, 5] = np.random.uniform(-board_area / 20.0, board_area / 20.0, size=(batch_size,)).astype(np.float32)
-
-    # Set specific global features to binary values (0 or 1)
-    binary_global_indices = [0, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 17]
-    global_input_data[:, binary_global_indices] = np.random.randint(0, 2, size=(batch_size, len(binary_global_indices))).astype(np.float32)
-
-    # Wave function for komi (index 18) - represents a wave-like pattern based on komi
-    komi_floor_delta = np.random.uniform(0, 2, size=(batch_size,)).astype(np.float32)
-    wave_feature = np.where(komi_floor_delta < 0.5, komi_floor_delta,
-                            np.where(komi_floor_delta < 1.5, 1.0 - komi_floor_delta, komi_floor_delta - 2.0))
-    global_input_data[:, 18] = wave_feature
-
-    # Return the data in the correct format for the model
-    return bin_input_data, global_input_data
-
-device = torch.device("cpu")
-
 # Get the directory where the current script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Construct the full path to the model files
-model_path_b6c96 = os.path.join(script_dir, "checkpoints/model_b6c96_epoch_4_s640_d640.ckpt")
 model_path_b18c384 = os.path.join(script_dir, "b18c384nbt-humanv0.ckpt")
-
 
 def generate_new_model(config="b6c96-fson-mish-rvgl-bnh"):
     model_config = config_of_name[config]
@@ -84,19 +41,29 @@ def generate_new_model(config="b6c96-fson-mish-rvgl-bnh"):
     model.initialize()
     return model
 
-model_b6c96 = generate_new_model()
 
-# # Load the b6c96 model
-# model_b6c96, swa_model_b6c96, _ = load_model(
-#     model_path_b6c96, 
-#     use_swa=False,  # or True if you want to use SWA
-#     device=device,
-#     pos_len=19,  # Adjust if needed
-#     verbose=False
-# )
+parser = argparse.ArgumentParser(description="Train a Go AI model.")
+parser.add_argument('--load-model', type=str, help='Path to the model to load')
+args = parser.parse_args()
 
-model_b6c96.to(device)
+# Device setup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
+# Model loading or generation
+if args.load_model:
+    print(f"Loading model from {args.load_model}")
+    model_b6c96, swa_model_b6c96, _ = load_model(
+        args.load_model,
+        use_swa=False,  # or True if you want to use SWA
+        device=device,
+        pos_len=size,
+        verbose=False
+    )
+else:
+    print("No model path provided. Generating a new model.")
+    model_b6c96 = generate_new_model()
+    model_b6c96.to(device)
 
 # Load the b18c384 model
 model_b18c384, swa_model_b18c384, _ = load_model(
