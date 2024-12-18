@@ -12,6 +12,16 @@ from sgfmetadata import SGFMetadata
 from gamestate import GameState
 import argparse
 
+parser = argparse.ArgumentParser(description="Train a Go AI model.")
+parser.add_argument('--load-model', type=str, help='Path to the model to load')
+parser.add_argument('--model-config', type=str, help='Model config')
+model_config = "b6c96-fson-mish-rvgl-bnh-meta"
+
+args = parser.parse_args()
+
+if args.model_config:
+    model_config = model_config
+
 size = 19
 
 def get_model_outputs(pla, sgfmeta, bin_input_data, global_input_data, model):
@@ -35,16 +45,11 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 model_path_b18c384 = os.path.join(script_dir, "b18c384nbt-humanv0.ckpt")
 
-def generate_new_model(config="b6c96-fson-mish-rvgl-bnh"):
-    model_config = config_of_name[config]
-    model = Model(model_config, size)
+def generate_new_model():
+    config = config_of_name[model_config]
+    model = Model(config, size)
     model.initialize()
     return model
-
-
-parser = argparse.ArgumentParser(description="Train a Go AI model.")
-parser.add_argument('--load-model', type=str, help='Path to the model to load')
-args = parser.parse_args()
 
 # Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -65,6 +70,12 @@ else:
     model_b6c96 = generate_new_model()
     model_b6c96.to(device)
 
+def print_model_dtypes(model, model_name="model"):
+    print(f"Data types for {model_name}:")
+    for name, param in model.named_parameters():
+        print(f"Parameter: {name}, dtype: {param.dtype}")
+
+
 # Load the b18c384 model
 model_b18c384, swa_model_b18c384, _ = load_model(
     model_path_b18c384, 
@@ -73,6 +84,8 @@ model_b18c384, swa_model_b18c384, _ = load_model(
     pos_len=19, 
     verbose=False
 )
+
+print_model_dtypes(model_b18c384, "model_b18c384")
 
 print("model config model_b6c96")
 print(model_b6c96.config)
@@ -117,8 +130,12 @@ def save_checkpoint(model_state_dict, swa_model_state_dict, optimizer_state_dict
     os.replace(path + ".tmp", path)
 
 def choose_move(moves_and_probs):
-    choice = np.random.rand() # chooise random float between 0 and 1
+    if not moves_and_probs:
+        raise ValueError("moves_and_probs is empty, cannot choose a move.")
+
+    choice = np.random.rand()  # choose random float between 0 and 1
     cumulative_prob = 0
+    
     for prob in moves_and_probs:
         cumulative_prob += prob[1]
         if cumulative_prob >= choice:
@@ -127,41 +144,15 @@ def choose_move(moves_and_probs):
             row = np.floor(prob_loc / (19 + 1)) - 1
             return int((size + 1) * (row + 1) + (col + 1))
 
-def post_process_outputs(board, model, model_outputs):
-    outputs = model.postprocess_output(model_outputs)
-    (
-        policy_logits,      # N, num_policy_outputs, move
-        value_logits,       # N, {win,loss,noresult}
-        td_value_logits,    # N, {long, mid, short} {win,loss,noresult}
-        pred_td_score,      # N, {long, mid, short}
-        ownership_pretanh,  # N, 1, y, x
-        pred_scoring,       # N, 1, y, x
-        futurepos_pretanh,  # N, 2, y, x
-        seki_logits,        # N, 4, y, x
-        pred_scoremean,     # N
-        pred_scorestdev,    # N
-        pred_lead,          # N
-        pred_variance_time, # N
-        pred_shortterm_value_error, # N
-        pred_shortterm_score_error, # N
-        scorebelief_logits, # N, 2 * (self.pos_len*self.pos_len + EXTRA_SCORE_DISTR_RADIUS)
-    ) = (x[0] for x in outputs[0]) # N = 0
+    # Fallback: if no move is selected (cumulative_prob < 1.0 due to rounding errors), return the last move
+    prob_loc = moves_and_probs[-1][0]
+    col = (prob_loc) % (19 + 1) - 1
+    row = np.floor(prob_loc / (19 + 1)) - 1
+    return int((size + 1) * (row + 1) + (col + 1))
 
-    policy0 = torch.nn.functional.softmax(policy_logits[0,:],dim=0).cpu().numpy()
-
-    moves_and_probs0 = []
-    for i in range(len(policy0)):
-        move = features.tensor_pos_to_loc(i,board)
-        if i == len(policy0)-1:
-            moves_and_probs0.append((Board.PASS_LOC,policy0[i]))
-        elif board.would_be_legal(board.pla ,move):
-            moves_and_probs0.append((move,policy0[i]))
-    
-    return moves_and_probs0
 
 # Training loop
-num_epochs = 2000
-batch_size = 32  # Define a batch size for training
+num_epochs = 8000
 train_state = {
     "global_step_samples": 0,  # Example, replace with actual step count
 }
@@ -175,33 +166,47 @@ model_b18c384.eval()
 for epoch in range(num_epochs):
     game_state = new_game()
     move = 1
-    while move is not Board.PASS_LOC: #Play one game per epoch
-        sgfmeta = {
-            "inverseBRank": np.random.randint(31),
-            "inverseWRank": np.random.randint(31),
-            "bIsHuman": True,
-            "wIsHuman": True,
-            "gameIsUnrated": False,
-            "gameRatednessIsUnknown": False,
-            "tcIsUnknown": False,
-            "tcIsByoYomi": True,
-            "mainTimeSeconds": np.random.randint(3001),
-            "periodTimeSeconds": np.random.randint(31),
-            "byoYomiPeriods": np.random.randint(11),
-            "gameDate": str(np.random.randint(200) + 1823) + "-06-01",
-            "source": np.random.randint(7)
-        }
+    
+    time_known = np.random.choice([True, False])
+    periods = np.random.randint(5)
+    source = np.random.randint(7)
 
+    b_rank = np.random.randint(30)
+    w_rank = np.random.randint(30)
+
+    if source >= 5:
+        time_known = False
+        b_rank = np.random.randint(6)
+        w_rank = np.random.randint(6)
+    
+
+    sgfmeta = {
+        "inverseBRank": np.random.randint(30),
+        "inverseWRank": np.random.randint(30),
+        "bIsHuman": b_rank != 0,
+        "wIsHuman": w_rank != 0,
+        "gameIsUnrated": False,
+        "gameRatednessIsUnknown": source != 2,
+        "tcIsUnknown": not time_known,
+        "tcIsByoYomi": time_known,
+        "mainTimeSeconds": np.random.randint(1800) if time_known else 0,
+        "periodTimeSeconds": np.random.randint(31) if (time_known and periods) else 0,
+        "byoYomiPeriods": periods if time_known else 0,
+        "gameDate": str(np.random.randint(200) + 1823) + "-06-01",
+        "canadianMoves": 0,
+        "source": source
+    }
+    
+    while move is not Board.PASS_LOC: #Play one game per epoch
         sgfmeta = SGFMetadata.of_dict(sgfmeta)
-        pla = np.random.randint(2)
         
         features = Features(model_b18c384.config, model_b18c384.pos_len)
         inputs, input_global = game_state.get_input_features(features)
         
         # Forward pass through both models
-        outputs_b6c96 = get_model_outputs(pla, sgfmeta, inputs, input_global, model_b6c96)
+        outputs_b6c96 = get_model_outputs(game_state.board.pla, sgfmeta, inputs, input_global, model_b6c96)
         with torch.no_grad():
-            outputs_b18c384 = get_model_outputs(pla, sgfmeta, inputs, input_global, model_b18c384)
+            outputs_b18c384 = get_model_outputs(game_state.board.pla, sgfmeta, inputs, input_global, model_b18c384)
             
         outputs_b6c96 = flatten_all_tensors(outputs_b6c96)
         outputs_b18c384 = flatten_all_tensors(outputs_b18c384)
@@ -225,18 +230,20 @@ for epoch in range(num_epochs):
     print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
 
     # Define checkpoint file path
-    modelname = f"model_b6c96_epoch_{epoch+1}_s{train_state['global_step_samples']}"
+    modelname = f"{model_config}{epoch+1}_s{train_state['global_step_samples']}"
     checkpoint_path = os.path.join("checkpoints", modelname + ".ckpt")
 
-    # Save the checkpoint
-    save_checkpoint(
-        model_b6c96.state_dict(),
-        None,  # Replace with swa_model_state_dict if using SWA
-        optimizer.state_dict(),
-        {},  # Replace with metrics_obj_state_dict if using
-        {},
-        train_state,
-        {},
-        checkpoint_path
-    )
-    print(f"Checkpoint saved to {checkpoint_path}")
+    if epoch % 20 == 0:
+        # Save the checkpoint
+        save_checkpoint(
+            model_b6c96.state_dict(),
+            None,  # Replace with swa_model_state_dict if using SWA
+            optimizer.state_dict(),
+            {},  # Replace with metrics_obj_state_dict if using
+            {},
+            train_state,
+            {},
+            checkpoint_path
+        )
+        print(f"Checkpoint saved to {checkpoint_path}")
+

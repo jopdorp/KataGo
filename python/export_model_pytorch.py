@@ -33,6 +33,7 @@ parser.add_argument('-checkpoint', help='Checkpoint to test', required=True)
 parser.add_argument('-export-dir', help='model file dir to save to', required=True)
 parser.add_argument('-model-name', help='name to record in model file', required=True)
 parser.add_argument('-filename-prefix', help='filename prefix to save to within dir', required=True)
+parser.add_argument('-is-big-endian', help='Export model as big endian intead of little endian', required=False)
 parser.add_argument('-use-swa', help='Use SWA model', action="store_true", required=False)
 parser.add_argument('-export-14-as-15', help='Export model version 14 as 15', action="store_true", required=False)
 args = vars(parser.parse_args())
@@ -45,6 +46,7 @@ def main(args):
     filename_prefix = args["filename_prefix"]
     use_swa = args["use_swa"]
     export_14_as_15 = args["export_14_as_15"]
+    is_big_endian=["is_big_endian"]
 
     os.makedirs(export_dir,exist_ok=True)
 
@@ -121,12 +123,15 @@ def main(args):
 
 
     def write_weights(weights):
-        # Little endian
-        reshaped = np.reshape(weights.detach().numpy(),[-1])
-        num_weights = len(reshaped)
-        writestr("@BIN@")
-        f.write(struct.pack(f'<{num_weights}f',*reshaped))
-        writestr("\n")
+         reshaped = np.reshape(weights.detach().numpy(),[-1])
+         num_weights = len(reshaped)
+         writestr("@BIN@")
+         if is_big_endian:
+            f.write(struct.pack(f'>{num_weights}f',*reshaped)) # '>' for Big-endian
+         else:
+            f.write(struct.pack(f'<{num_weights}f',*reshaped)) # '<' for Little endian
+            writestr("\n")
+
 
     def write_conv_weight(name,convweight):
         (out_channels, in_channels, diamy, diamx) = convweight.shape
@@ -436,17 +441,17 @@ def main(args):
             data["global_step_samples"] = train_state["global_step_samples"]
         if "total_num_data_rows" in train_state:
             data["total_num_data_rows"] = train_state["total_num_data_rows"]
-        if "running_metrics" in other_state_dict:
-            assert sorted(list(other_state_dict["running_metrics"].keys())) == ["sums", "weights"]
-            data["extra_stats"] = {
-                "sums": { key: value for (key,value) in other_state_dict["running_metrics"]["sums"].items() if "sopt" not in key and "lopt" not in key },
-                "weights": { key: value for (key,value) in other_state_dict["running_metrics"]["weights"].items() if "sopt" not in key and "lopt" not in key },
-            }
-            if "last_val_metrics" in other_state_dict and "sums" in other_state_dict["last_val_metrics"] and "weights" in other_state_dict["last_val_metrics"]:
-                data["extra_stats"]["last_val_metrics"] = {
-                    "sums": { key: value for (key,value) in other_state_dict["last_val_metrics"]["sums"].items() if "sopt" not in key and "lopt" not in key },
-                    "weights": { key: value for (key,value) in other_state_dict["last_val_metrics"]["weights"].items() if "sopt" not in key and "lopt" not in key },
-                }
+        # if "running_metrics" in other_state_dict:
+        #     assert sorted(list(other_state_dict["running_metrics"].keys())) == ["sums", "weights"]
+        #     data["extra_stats"] = {
+        #         "sums": { key: value for (key,value) in other_state_dict["running_metrics"]["sums"].items() if "sopt" not in key and "lopt" not in key },
+        #         "weights": { key: value for (key,value) in other_state_dict["running_metrics"]["weights"].items() if "sopt" not in key and "lopt" not in key },
+        #     }
+        #     if "last_val_metrics" in other_state_dict and "sums" in other_state_dict["last_val_metrics"] and "weights" in other_state_dict["last_val_metrics"]:
+        #         data["extra_stats"]["last_val_metrics"] = {
+        #             "sums": { key: value for (key,value) in other_state_dict["last_val_metrics"]["sums"].items() if "sopt" not in key and "lopt" not in key },
+        #             "weights": { key: value for (key,value) in other_state_dict["last_val_metrics"]["weights"].items() if "sopt" not in key and "lopt" not in key },
+        #         }
         json.dump(data,f)
 
 

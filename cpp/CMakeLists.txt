@@ -9,8 +9,12 @@ include_directories(SYSTEM external/filesystem-1.5.8/include) #SYSTEM suppresses
 
 #--------------------------- PLATFORM SPECIFIC -------------------------------------------------------------------------
 if(ANDROID)
-  add_definitions(-DBYTE_ORDER=LITTLE_ENDIAN)
   string(REGEX REPLACE "/cpp$" "" CMAKE_MODIFIED_LIST_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
+  # Force little endian for Android (most Android devices are little endian)
+  add_definitions(-DBYTE_ORDER=1234)
+  add_definitions(-DBIG_ENDIAN=4321)
+  add_definitions(-DLITTLE_ENDIAN=1234)
 
   set(OpenCL_LIBRARY "${CMAKE_MODIFIED_LIST_DIR}/jniLibs/${ANDROID_ABI}/libOpenCL.so")
 
@@ -98,7 +102,7 @@ elseif(USE_BACKEND STREQUAL "TENSORRT")
     message(FATAL_ERROR "Combining USE_CACHE_TENSORRT_PLAN with BUILD_DISTRIBUTED is not supported - it would consume excessive disk space and might worsen performance every time models are updated. Use only one at a time in a given build of KataGo.")
   endif()
 elseif(USE_BACKEND STREQUAL "OPENCL")
-  message(STATUS "-DUSE_BACKEND=OPENCL, using OpenCL backend.")
+  message(STATUS "-DUSE_BACKEND=OPENCL, using OpenCl backend.")
   set(NEURALNET_BACKEND_SOURCES
     neuralnet/openclbackend.cpp
     neuralnet/openclkernels.cpp

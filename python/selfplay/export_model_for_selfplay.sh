@@ -5,7 +5,7 @@ set -o pipefail
 #Takes any models in torchmodels_toexport_extra/ and outputs a cuda-runnable model file to models_extra/
 #Should be run periodically.
 
-if [[ $# -ne 3 ]]
+if [[ $# -ne 4 ]]
 then
     echo "Usage: $0 NAMEPREFIX BASEDIR USEGATING"
     echo "Currently expects to be run from within the 'python' directory of the KataGo repo, or otherwise in the same dir as export_model.py."
@@ -19,6 +19,8 @@ shift
 BASEDIR="$1"
 shift
 USEGATING="$1"
+shift
+IS_BIG_ENDIAN="$1"
 shift
 
 #------------------------------------------------------------------------------
@@ -69,7 +71,7 @@ function exportStuff() {
                         -export-dir "$TMPDST" \
                         -model-name "$NAMEPREFIX""-""$NAME" \
                         -filename-prefix model \
-                        -use-swa
+                        -is-big-endian $IS_BIG_ENDIAN \
 
                 python3 ./clean_checkpoint.py \
                         -checkpoint "$SRC"/model.ckpt \

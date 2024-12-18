@@ -22,10 +22,12 @@ data = torch.load(checkpoint_path,map_location="cpu")
 
 if "optimizer" in data:
     del data["optimizer"]
-del data["running_metrics"]
-del data["metrics"]
-del data["train_state"]["old_train_data_dirs"]
-del data["train_state"]["data_files_used"]
+if "running_metrics" in data:
+    del data["running_metrics"]
+if "metrics" in data:
+    del data["metrics"]
+# del data["train_state"]["old_train_data_dirs"]
+# del data["train_state"]["data_files_used"]
 
 if "last_val_metrics" in data:
     del data["last_val_metrics"]
